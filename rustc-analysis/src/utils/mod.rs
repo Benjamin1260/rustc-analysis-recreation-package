@@ -1,5 +1,5 @@
 pub mod analysis_results;
-pub mod cargo_metadata;
+pub mod crate_metadata_index;
 pub mod cli;
 pub mod db;
 pub mod github;

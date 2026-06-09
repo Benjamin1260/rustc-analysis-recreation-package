@@ -1,9 +1,9 @@
 #![feature(pathbuf_into_string)]
 
 use clap::Parser;
-use rustc_analysis::utils::{cargo_metadata::CargoMetadataIndex, db::{DB, Repo}, github::{clone_repo, fetch_repo_urls}};
+use rustc_analysis::utils::{crate_metadata_index::CrateMetadataIndex, db::{DB, Repo}, github::{clone_repo, fetch_repo_urls}};
 use shlex;
-use std::{fs::{OpenOptions, remove_file}, io::{ErrorKind::NotFound, Write}, path::{Path, PathBuf}, process::Command};
+use std::{fs::remove_file, io::ErrorKind::NotFound, path::{Path, PathBuf}, process::Command};
 
 use rustc_analysis::utils::cli::{Cli, Commands, CommonArgs};
 
@@ -56,21 +56,36 @@ async fn main() {
 
             // stage4: run analysis
             for repo in repos {
+                if repo.analyzed {
+                    println!("Repo {} already analyzed, skipping...", repo.id);
+                    continue;
+                } 
+
                 let target_dir = repo_dir_path.join(Path::new(&repo.id.to_string()));
 
                 // stage4_A: build cargo_metadata_index
-                let cargo_metadata_index: CargoMetadataIndex = target_dir.clone().into();
+                let cargo_metadata_index: CrateMetadataIndex = CrateMetadataIndex::from_path(target_dir.clone(), &repo);
                 let cmi_serialized = serde_json::to_string(&cargo_metadata_index).unwrap();
                 std::fs::write(target_dir.with_file_name(".cargo_metadata_index"),cmi_serialized).unwrap();
 
                 // stage4_B: invoke wrapper/rustc backend
                 cargo_clean_workspace(&target_dir);
                 eprintln!("invoking cargo");
-                build_command(&repo.cargo_args, &target_dir, cmd_type)
+                let result = build_command(&repo.cargo_args, &target_dir, cmd_type)
                     .env("REPOSITORY_ID", repo.id.to_string())
                     .env("RUSTC_ANALYSIS_OUTPUT", std::fs::canonicalize(duckdb_path.clone()).unwrap().as_os_str())
                     .status().unwrap();
+
+                if result.success() {
+                    println!("Analysis successful, writing to db!");
+                    let db = DB::open(duckdb_path.clone().into_string().unwrap());
+                    db.set_analyzed_true(repo.id);
+                    db.conn.close().unwrap();
+                }
             }
+
+            // stage5: duckdb postprocessing
+            // TODO: SHOULD implement to already resolve some shared crates like those from rust-lib
         },
     }
 }

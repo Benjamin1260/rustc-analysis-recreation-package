@@ -9,12 +9,12 @@ pub struct Repo {
     pub repo_url: String,
     pub commit_hash: Option<String>,
     pub cargo_args: Option<String>,
+    pub analyzed: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Crate {
     pub stable_crate_id: u64,
-    pub src_repo: u32,
     pub name: String,
     pub version: String,
     pub internal: bool,
@@ -32,6 +32,7 @@ pub struct DefIdKind {
 pub struct DefIdRow {
     pub stable_crate_id: u64,
     pub local_hash: u64,
+    pub src_repo: u32,
     pub def_path_str: String,
     pub kind: u32,
     pub nonsafe: bool, // unsafe is reserved keyword
@@ -72,7 +73,7 @@ impl DB {
     }
 
 
-    // repo interaction
+    // repos
     pub fn insert_repo_urls(&self, url_list: Vec<String>) -> duckdb::Result<()>{
         self.conn.execute("BEGIN TRANSACTION;", ()).unwrap();
 
@@ -95,7 +96,7 @@ impl DB {
 
     pub fn fetch_repos(&self) -> Vec<Repo> {
         let mut stmt = self.conn.prepare(r#"
-            SELECT id, repo_url, commit_hash, cargo_args
+            SELECT *
             FROM Repos
             ORDER BY id
             "#,
@@ -108,6 +109,7 @@ impl DB {
                     repo_url: row.get(1).unwrap(),
                     commit_hash: row.get(2).unwrap(),
                     cargo_args: row.get(3).unwrap(),
+                    analyzed: row.get(4).unwrap(),
                 })
             }).unwrap()
             .collect::<Result<Vec<_>, _>>().unwrap()
@@ -124,37 +126,51 @@ impl DB {
         stmt.execute(params![hash, id]).unwrap();
     }
 
+    pub fn set_analyzed_true(&self, id: u32) {
+        let mut stmt = self.conn.prepare(r#"
+            UPDATE repos
+            SET analyzed = TRUE
+            WHERE id = ?;
+        "#).unwrap();
+
+        stmt.execute(params![id]).unwrap();
+    }
+
 
     // analysis results
-    pub fn save_results(&mut self, results: AnalysisResults) {
-        // TODO: SHOULD bring transaction back
+    pub fn save_results(&mut self, _repo_id: u32, results: AnalysisResults) {
+        let tx = self.conn.transaction().unwrap();
 
         {
-            eprintln!{"{:#?}", results};
-
             // persist Crates
-            self.conn.appender("Crates")
-                .unwrap()
-                .append_rows(results.crates.into_iter().map(Crate::params))
-                .unwrap();
+            let mut stmt = tx.prepare(r#"
+                INSERT INTO Crates
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(stable_crate_id) DO NOTHING
+            "#).unwrap();
+
+            for crate_row in results.crates {
+                stmt.execute(crate_row.params()).unwrap();
+            }
 
             // persist DefIDKinds (use id=0)
             // skip for now
             // TODO: SHOULD check if this should remain skipped
 
             // persist DefIds
-            self.conn.appender("DefIds")
+            tx.appender("DefIds")
                 .unwrap()
                 .append_rows(results.def_ids.into_iter().map(DefIdRow::params))
                 .unwrap();
 
             // persist Dependencies
-            self.conn.appender("Dependencies")
+            tx.appender("Dependencies")
                 .unwrap()
                 .append_rows(results.dependencies.into_iter().map(Dependency::params))
                 .unwrap();
         }
 
+        tx.commit().unwrap();
     }
 
 
@@ -181,7 +197,8 @@ impl DB {
             id UINT32 PRIMARY KEY DEFAULT nextval('repo_id_seq'),
             repo_url VARCHAR NOT NULL UNIQUE,
             commit_hash VARCHAR,
-            cargo_args VARCHAR
+            cargo_args VARCHAR,
+            analyzed BOOLEAN DEFAULT FALSE
         );
 
         CREATE TABLE MergedCrates (
@@ -195,27 +212,26 @@ impl DB {
 
         CREATE TABLE Crates (
             stable_crate_id UINT64 PRIMARY KEY,
-            src_repo UINT32 NOT NULL,
             name VARCHAR NOT NULL,
             version VARCHAR NOT NULL,
             internal BOOLEAN NOT NULL,
             path_url VARCHAR NOT NULL,
             merged_crate_id UINT32,
 
-            FOREIGN KEY (src_repo) REFERENCES Repos(id),
-            FOREIGN KEY (merged_crate_id) REFERENCES MergedCrates(id),
-            UNIQUE (src_repo, name, version, path_url)
+            FOREIGN KEY (merged_crate_id) REFERENCES MergedCrates(id)
         );
 
         CREATE TABLE DefIds (
             stable_crate_id UINT64 NOT NULL,
             local_hash UINT64 NOT NULL,
+            src_repo UINT32 NOT NULL,
             def_path_str VARCHAR NOT NULL,
             kind UINT32 NOT NULL,
             unsafe BOOLEAN NOT NULL,
             
             PRIMARY KEY (stable_crate_id, local_hash),
             FOREIGN KEY (stable_crate_id) REFERENCES Crates(stable_crate_id),
+            FOREIGN KEY (src_repo) REFERENCES Repos(id),
             FOREIGN KEY (kind) REFERENCES DefIdKinds(id)
         );
 
@@ -241,17 +257,15 @@ impl DB {
             PRIMARY KEY (stable_crate_id, local_hash, problem),
             FOREIGN KEY (stable_crate_id, local_hash) REFERENCES DefIds(stable_crate_id, local_hash),
             FOREIGN KEY (problem) REFERENCES ProblemTree(problem),
-            CHECK (line_nr_start >= 0),
             CHECK (line_nr_end >= line_nr_start)
         );
     "; 
 }
 
 impl Crate {
-    fn params(self) -> (u64, u32, String, String, bool, String, Option<u32>) {
+    fn params(self) -> (u64, String, String, bool, String, Option<u32>) {
         (
             self.stable_crate_id,
-            self.src_repo,
             self.name,
             self.version,
             self.internal,
@@ -262,10 +276,11 @@ impl Crate {
 }
 
 impl DefIdRow {
-    fn params(self) -> (u64, u64, String, u32, bool) {
+    fn params(self) -> (u64, u64, u32, String, u32, bool) {
         (
             self.stable_crate_id,
             self.local_hash,
+            self.src_repo,
             self.def_path_str,
             self.kind,
             self.nonsafe,

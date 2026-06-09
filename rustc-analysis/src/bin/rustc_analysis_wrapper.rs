@@ -6,13 +6,13 @@ mod rustc_private_utils;
 
 extern crate rustc_driver;
 
-use std::{collections::HashMap, fs::OpenOptions, io::Write};
+use std::{fs::OpenOptions, io::Write};
 
 use rustc_private_utils::{analysis_callback::AnalysisCallback, fn_dep_analysis};
-use cargo_metadata::MetadataCommand;
-use rustc_analysis::utils::{analysis_results::AnalysisResults, cargo_metadata::CargoMetadataIndex, cli::Commands, db::DB};
+use rustc_analysis::utils::{analysis_results::AnalysisResults, crate_metadata_index::CrateMetadataIndex, cli::Commands, db::DB};
 use rustc_driver::Callbacks;
 
+#[allow(dead_code)]
 #[derive(Default)]
 struct EmptyCallback;
 
@@ -51,11 +51,11 @@ fn run_analyze(args: Vec<String>) {
 
     let cwd = std::env::current_dir().unwrap();
     let cmi_serialized = std::fs::read_to_string(cwd.with_file_name(".cargo_metadata_index")).unwrap();
-    let cargo_metadata_index: CargoMetadataIndex = serde_json::from_str(&cmi_serialized).unwrap();
+    let cargo_metadata_index: CrateMetadataIndex = serde_json::from_str(&cmi_serialized).unwrap();
 
     let mut analysis_callback = AnalysisCallback {
         repo_id: repo_id,
-        cargo_metadata_index: cargo_metadata_index,
+        crate_metadata_index: cargo_metadata_index,
         data: AnalysisResults::default(),
     };
 
@@ -67,7 +67,7 @@ fn run_analyze(args: Vec<String>) {
     let db_path = std::env::var("RUSTC_ANALYSIS_OUTPUT").unwrap();
     {
         let mut db = DB::open(db_path);
-        db.save_results(analysis_callback.data);
+        db.save_results(analysis_callback.repo_id, analysis_callback.data);
         db.conn.close().unwrap();
     }
 }

@@ -8,19 +8,19 @@ extern crate rustc_session;
 extern crate rustc_span;
 extern crate rustc_type_ir;
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{ffi::OsStr, path::PathBuf};
 
-use rustc_analysis::utils::{analysis_results::AnalysisResults, cargo_metadata::{CargoMetadataIndex, CrateMetadata}, db::*, directed_graph::DirectedGraph};
+use rustc_analysis::utils::{analysis_results::AnalysisResults, crate_metadata_index::{CrateMetadata, CrateMetadataIndex}, db::*, directed_graph::DirectedGraph};
 use rustc_driver::{Callbacks, Compilation};
-use rustc_hir::def_id::{CrateNum, DefId, DefPathHash, LOCAL_CRATE, LocalDefId};
+use rustc_hir::def_id::{CRATE_DEF_INDEX, CrateNum, DefId, LOCAL_CRATE, LocalDefId};
 use rustc_interface::interface::Compiler;
-use rustc_middle::{dep_graph::DepNodeKey, ty::TyCtxt};
-use rustc_session::cstore::CrateSource;
+use rustc_middle::ty::TyCtxt;
+use rustc_span::{FileName, RemapPathScopeComponents};
 
 #[derive(Debug)]
 pub struct AnalysisCallback {
     pub repo_id: u32,
-    pub cargo_metadata_index: CargoMetadataIndex,
+    pub crate_metadata_index: CrateMetadataIndex,
 
     pub data: AnalysisResults,
 }
@@ -32,7 +32,7 @@ impl AnalysisCallback {
 
         for (def_id, outgoing) in graph.outgoing.into_iter() {
             // def_ids
-            self.data.def_ids.push(new_def_id_row(&tcx, def_id));
+            self.data.def_ids.push(new_def_id_row(&tcx, def_id, self.repo_id));
 
             // dependencies
             self.data.dependencies.extend(outgoing.into_iter()
@@ -40,25 +40,24 @@ impl AnalysisCallback {
             );
         }
 
-        // TODO: SHOULD remove code duplication
-        // TODO: SHOULD fix default path to point to manifest instead
-        // maybe we can insert an assert statement to check if the dir is `\/[0-9]+$`
-        let local_crate_num = LOCAL_CRATE;
-        let local_crate_name = tcx.crate_name(local_crate_num).to_string();
-        let Some(crate_metadata) = self.cargo_metadata_index.find_crate(local_crate_name.clone(), PathBuf::default())
-        else { panic!("could not find crate {:?} in `cargo_metadata_index`:\n\n{:#?}", local_crate_name, self.cargo_metadata_index); };
+        let local_crate_metadata = self.crate_metadata_index.local_crate.clone();
+        let local_crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
+        if !local_crate_metadata.name.eq(&local_crate_name) {
+            eprintln!("WARNING: local_crate_metadata.name does not match rustc::LOCAL_CRATE [{}!={}]", local_crate_metadata, local_crate_name);
+            // TODO: SHOULD check if this warning gets printed on `build_script_build` in `vaultwarden`
+        }
+
         self.data.crates.push(Crate {
-            stable_crate_id: tcx.stable_crate_id(local_crate_num).as_u64(),
-            src_repo: self.repo_id,
+            stable_crate_id: tcx.stable_crate_id(LOCAL_CRATE).as_u64(),
             name: local_crate_name,
-            version: crate_metadata.version,
-            internal: crate_metadata.internal,
-            path_url: crate_metadata.path.into_string().unwrap(),
+            version: local_crate_metadata.version,
+            internal: local_crate_metadata.origin.is_internal(), // TODO: SHOULD remove internal
+            path_url: local_crate_metadata.path.into_string().unwrap(),
             merged_crate_id: None,
         });
 
         self.data.crates.extend(tcx.crates(()).iter()
-            .map(|crate_num| new_crate(&tcx, crate_num.clone(), self.repo_id, &self.cargo_metadata_index))
+            .map(|crate_num| new_crate(&tcx, crate_num.clone(), self.repo_id, &mut self.crate_metadata_index))
         );
 
         // TODO: SHOULD init def_id_kinds 
@@ -67,12 +66,13 @@ impl AnalysisCallback {
     }
 }
 
-fn new_def_id_row(tcx: &TyCtxt, def_id: DefId) -> DefIdRow {
+fn new_def_id_row(tcx: &TyCtxt, def_id: DefId, src_repo: u32) -> DefIdRow {
     let hash = tcx.def_path_hash(def_id);
 
     DefIdRow {
         stable_crate_id: hash.stable_crate_id().as_u64(),
         local_hash: hash.local_hash().as_u64(),
+        src_repo: src_repo,
         def_path_str: tcx.def_path_str(def_id),
         kind: 0, // TODO: SHOULD fix this
         nonsafe: false, // TODO: MUST implement this
@@ -91,31 +91,109 @@ fn new_dependency(tcx: &TyCtxt, def_id_from: DefId, def_id_to: DefId) -> Depende
     }
 }
 
-fn new_crate(tcx: &TyCtxt, crate_num: CrateNum, repo_id: u32, cargo_metadata_index: &CargoMetadataIndex) -> Crate {
+fn new_crate(tcx: &TyCtxt, crate_num: CrateNum, _repo_id: u32, cargo_metadata_index: &mut CrateMetadataIndex) -> Crate {
     let crate_name = tcx.crate_name(crate_num).to_string();
-    let rustc_path = get_path_from_crate_source(&tcx.used_crate_source(crate_num));
+    let rustc_path = get_path_from_crate_num(&tcx, crate_num);
 
-    let Some(crate_metadata) = cargo_metadata_index.find_crate(crate_name.clone(), rustc_path)
-    else { panic!("could not find crate {:?} in `cargo_metadata_index`:\n\n{:#?}", crate_name, cargo_metadata_index); };
+    let crate_metadata_matches = cargo_metadata_index.find_crates_with_alias(crate_name.clone(), rustc_path.clone());
+    let crate_metadata: CrateMetadata;
+    crate_metadata = match crate_metadata_matches.len() {
+        0 => panic!("unreachable"),
+        1 => crate_metadata_matches[0].clone(), // TODO: SHOULD why the f do i gotta clone this if its dropped afterwards
+        _ => resolve_duplicate_crate_match(&tcx, crate_metadata_matches, crate_num), // this is so dirty, I hate it
+    };
 
     Crate {
         stable_crate_id: tcx.stable_crate_id(crate_num).as_u64(),
-        src_repo: repo_id,
         name: crate_name,
         version: crate_metadata.version,
-        internal: crate_metadata.internal,
+        internal: crate_metadata.origin.is_internal(), // TODO: SHOULD remove internal
         path_url: crate_metadata.path.into_string().unwrap(),
         merged_crate_id: None,
     }
 }
 
-fn get_path_from_crate_source(source: &CrateSource) -> PathBuf {
+fn get_path_from_crate_num(tcx: &TyCtxt, crate_num: CrateNum) -> PathBuf {
+    let source = tcx.used_crate_source(crate_num);
     source.rmeta
         .as_ref()
         .or(source.rlib.as_ref())
         .or(source.dylib.as_ref())
         .unwrap()
         .clone()
+
+    // let crate_root = DefId {
+    //     krate: crate_num,
+    //     index: CRATE_DEF_INDEX,
+    // };
+
+    // let source_file = tcx
+    //     .sess
+    //     .source_map()
+    //     .span_to_filename(tcx.def_span(crate_root));
+
+    // let FileName::Real(real_filename) = source_file else {
+    //     panic!("FileName was not real!\n{:#?}", source_file);
+    // };
+
+    // let path = real_filename.path(RemapPathScopeComponents::DIAGNOSTICS);
+    // path.to_path_buf()
+
+    // // FIXME: SHOULD, this is dirty...
+    // loop {
+    //     let final_part = path.file_name().unwrap();
+    //     if final_part.to_str().unwrap().contains("-") {
+    //         return PathBuf::from(final_part);
+    //     } else {
+    //         path = match path.parent() {
+    //             Some(path) => path,
+    //             None => {panic!("Reached end of path without finding part containing '-'!\n{:#?}", real_filename);},
+    //         };
+    //     }
+    // }
+
+    // let Some(local_path) = real_filename.clone().into_local_path() else {
+    //     panic!("FileName did not have local_path!\n{:#?}", real_filename);
+    // };
+
+    // local_path
+}
+
+fn resolve_duplicate_crate_match(tcx: &TyCtxt, crate_metadata_matches: Vec<&CrateMetadata>, crate_num: CrateNum) -> CrateMetadata {
+    // preserved order of original matches
+    let workspace_to_crate: Vec<&OsStr> = crate_metadata_matches.iter()
+        .map(|cmd| cmd.path.file_name().unwrap())
+        .collect();
+
+    let crate_root = DefId {
+        krate: crate_num,
+        index: CRATE_DEF_INDEX,
+    };
+
+    let source_file = tcx
+        .sess
+        .source_map()
+        .span_to_filename(tcx.def_span(crate_root));
+
+    let FileName::Real(real_filename) = source_file else {
+        panic!("FileName was not real!\n{:#?}", source_file);
+    };
+
+    let idxs: Vec<usize> = real_filename.path(RemapPathScopeComponents::DIAGNOSTICS)
+        .iter()
+        .flat_map(|c| workspace_to_crate.iter().position(|dir| dir.eq(&c)))
+        .collect();
+
+    // holy moly this is abstract
+    // so we have a list of components, e.g. `.../rec_pack/rustc-analysis/repositories/2/target/debug/deps/libsocket2-a485476ad0da6c6b.rmeta`
+    // we go over them one-by-one untill we get to the crate version part: `.../<crate>-<version>/...`
+    // we match this against workspace_to_crate wich looks like e.g.: `socket2-0.5.10`
+    // we get the indices of these matches such that we can return the appropriate one
+
+    match idxs.len() {
+        1 => return crate_metadata_matches[idxs[0]].clone(), // TODO: why clone???
+        _ => panic!("\ncould not resolve duplicate crate match!\ntarget: {:#?}\noptions: {:#?}", real_filename, crate_metadata_matches),
+    }
 }
 
 

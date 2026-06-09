@@ -13,6 +13,7 @@
 2. (optional) generating repository list
 3. fetch data
 4. run analysis
+5. duckdb postprocessing
 
 #### 1. creating .duckdb file
 
@@ -30,6 +31,10 @@ Maybe we can say if no hash is present, it fetches the latest commit and also wr
 
 #### 4. run analysis
 see [run analysis](#run-analysis)
+
+#### 5. duckdb postprocessing
+
+This stage should perform any duckdb postprocessing that is universal across all analysis. An example of this is trying to already resolve/instantiate `MergedCrates`.
 
 ### Run Analysis:
 
@@ -62,6 +67,29 @@ This binary will be the main handle/API for the user to use. It will be responsi
 #### Cargo-Facing Binary:
 
 
+### CrateMetadataIndex:
+
+This is a resolver to match rustc crates to their cargo representation. This way we can get metadata like the version and path which are not available on the rustc side. We distinguish 3 types:
+
+#### Crate Origin:
+##### Self:
+This is the crate being compiled/checked itself. It is not present on the `rustc` side in `TyCtxt.crates()`. This is the main loop over which `AnalysisResults.crates` is initialized. So we need to handle this crate separately.
+
+##### Cargo Crates:
+These are the most straightforward since they are returned by both the `rustc` side aswel as `cargo_metadata`. We simply iterate over these and match the `rustc` data `(name, path)` to the `cargo_metadata` data to try and match these. Multiple crates may share the same name, hence we use the `path` for resolving conflicts.
+
+##### Sysroot Crates:
+These are returned by `rustc` but not by `cargo_metadata` meaning we need to handle these separately. They come from the **rust toolchain** used. These crates include `core`, `alloc`, `std`, `proc_macro`, `test`... 
+
+To tackle this, we parse the **toolchain** used in the `CrateMetadataIndex`, this will be used to resolve the version. Furthermore, we define an enum: `CrateOrigin` which is `Self`/`Cargo`/`RustLib`.
+
+#### Construction:
+`Self` and `Cargo` crates should be initialized in the user-side binary, serialized and sent to the rustc-side. `RustLib` crates are only visible to `rustc` and thus will be added here.
+
+For `RustLib` crates, this means `version`, `internal` and `path_url` will not be available from `CrateMetadataIndex`. This is not a problem since we can define them as follows:
+- `Crate.version` = `rustc_toolchain_version`
+- `Crate.internal` = `false`
+- `Crate.path_url` = `path_to_rustc_toolchain`
 
 
 ## Tasks
@@ -70,8 +98,8 @@ This binary will be the main handle/API for the user to use. It will be responsi
 
 #### Considered Done:
 
-- [ ] CLI command which takes a number to start analysis from scratch and spits out fully finished `.duckdb` file
-- [ ] CLI command which takes a `.duckdb` file with repository urls and fetches their latest comits, if hash is present, use those instead, then analyses those and runs the analysis, resulting in a filled `.duckdb` file
+- [x] CLI command which takes a number to start analysis from scratch and spits out fully finished `.duckdb` file
+- [x] CLI command which takes a `.duckdb` file with repository urls and fetches their latest comits, if hash is present, use those instead, then analyses those and runs the analysis, resulting in a filled `.duckdb` file
 
 #### Description:
 
@@ -83,12 +111,16 @@ implement [L0-pipeline architecture](#l0-pipeline-arch)
 - [x] hash present &rarr; fetch hash, else fetch latest and write hash
 - [x] create table row types
 - [x] create `AnalysisCallback` struct with tables using these row types (KEEP IN MIND: CALLBACK MIGHT BE INVOKED MULTIPLE TIMES, WHICH/WHEN DO WE WRITE BACK?) (maybe not since only callback for workspace crate?)
-- [ ] make callback write to these tables
-- [ ] after rustc invocation, write these results to `.duckdb` file
+- [x] make callback write to these tables
+- [x] after rustc invocation, write these results to `.duckdb` file
+- [ ] fix `CrateMetadataIndex` to properly resolve/handle `self` and `rust-lib` crates &larr;
+- [ ] fix TODOs in sourcecode
 - [ ] implement write to `cargo_invocation.csv` on analysis invocation
 - [ ] create API/command to simply write `cargo_invocation.csv` (without err msg)
 - [ ] create API/command to simply read `cargo_invocation.csv`
 - [ ] create arg on `analysis`-command that takes `cargo_invocation.csv`
+- [ ] implement pipeline `stage5`
+
 
 #### Questions:
 
