@@ -3,6 +3,9 @@ name = "rustc-analysis"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "rustc_analysis"
+
 [[bin]]
 name = "rustc_analysis"
 path = "src/bin/rustc_analysis.rs"
@@ -18,6 +21,14 @@ channel = "nightly"
 rustc_private = true
 
 [dependencies]
+cargo_metadata = "0.23.1"
 clap = { version = "4.6.1", features = ["derive"] }
 duckdb = { version = "1", features = ["bundled"] }
+fs = "0.0.5"
+futures-util = "0.3.32"
+octocrab = { version = "0.53.0", features = ["stream"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 shlex = "2"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+url = "2.5.8"

@@ -19,8 +19,8 @@ pub struct DirectedGraph<T>
 where 
     T: Eq + Hash + Copy + std::fmt::Debug
 {
-    incomming: HashMap<T, HashSet<T>>, // implies edge: T <- Set<T>
-    outgoing: HashMap<T, HashSet<T>>, // implies edge: T -> Set
+    pub incomming: HashMap<T, HashSet<T>>, // implies edge: T <- Set<T>
+    pub outgoing: HashMap<T, HashSet<T>>, // implies edge: T -> Set
 }
 
 impl<T> DirectedGraph<T> 

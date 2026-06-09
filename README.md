@@ -13,3 +13,5 @@
 More sections will be added
 
 ## 2. Analyzer Architecture
+
+TODO: add git being a required CLI tool

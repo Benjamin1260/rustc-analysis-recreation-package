@@ -1,0 +1,279 @@
+extern crate rustc_driver;
+extern crate rustc_hir;
+extern crate rustc_hir_id;
+extern crate rustc_interface;
+extern crate rustc_middle;
+extern crate rustc_public;
+extern crate rustc_session;
+extern crate rustc_span;
+extern crate rustc_type_ir;
+
+use std::{collections::HashMap, path::PathBuf};
+
+use rustc_analysis::utils::{analysis_results::AnalysisResults, cargo_metadata::{CargoMetadataIndex, CrateMetadata}, db::*, directed_graph::DirectedGraph};
+use rustc_driver::{Callbacks, Compilation};
+use rustc_hir::def_id::{CrateNum, DefId, DefPathHash, LOCAL_CRATE, LocalDefId};
+use rustc_interface::interface::Compiler;
+use rustc_middle::{dep_graph::DepNodeKey, ty::TyCtxt};
+use rustc_session::cstore::CrateSource;
+
+#[derive(Debug)]
+pub struct AnalysisCallback {
+    pub repo_id: u32,
+    pub cargo_metadata_index: CargoMetadataIndex,
+
+    pub data: AnalysisResults,
+}
+
+
+impl AnalysisCallback {
+    fn fill(&mut self, graph: DirectedGraph<DefId>, tcx: &TyCtxt) {
+        self.data.def_ids.reserve(graph.outgoing.len());
+
+        for (def_id, outgoing) in graph.outgoing.into_iter() {
+            // def_ids
+            self.data.def_ids.push(new_def_id_row(&tcx, def_id));
+
+            // dependencies
+            self.data.dependencies.extend(outgoing.into_iter()
+                .map(|def_id_to| new_dependency(&tcx, def_id, def_id_to))
+            );
+        }
+
+        // TODO: SHOULD remove code duplication
+        // TODO: SHOULD fix default path to point to manifest instead
+        // maybe we can insert an assert statement to check if the dir is `\/[0-9]+$`
+        let local_crate_num = LOCAL_CRATE;
+        let local_crate_name = tcx.crate_name(local_crate_num).to_string();
+        let Some(crate_metadata) = self.cargo_metadata_index.find_crate(local_crate_name.clone(), PathBuf::default())
+        else { panic!("could not find crate {:?} in `cargo_metadata_index`:\n\n{:#?}", local_crate_name, self.cargo_metadata_index); };
+        self.data.crates.push(Crate {
+            stable_crate_id: tcx.stable_crate_id(local_crate_num).as_u64(),
+            src_repo: self.repo_id,
+            name: local_crate_name,
+            version: crate_metadata.version,
+            internal: crate_metadata.internal,
+            path_url: crate_metadata.path.into_string().unwrap(),
+            merged_crate_id: None,
+        });
+
+        self.data.crates.extend(tcx.crates(()).iter()
+            .map(|crate_num| new_crate(&tcx, crate_num.clone(), self.repo_id, &self.cargo_metadata_index))
+        );
+
+        // TODO: SHOULD init def_id_kinds 
+        // should be setup in the front-end upon DB creation
+        // should be read from the database file
+    }
+}
+
+fn new_def_id_row(tcx: &TyCtxt, def_id: DefId) -> DefIdRow {
+    let hash = tcx.def_path_hash(def_id);
+
+    DefIdRow {
+        stable_crate_id: hash.stable_crate_id().as_u64(),
+        local_hash: hash.local_hash().as_u64(),
+        def_path_str: tcx.def_path_str(def_id),
+        kind: 0, // TODO: SHOULD fix this
+        nonsafe: false, // TODO: MUST implement this
+    }
+}
+
+fn new_dependency(tcx: &TyCtxt, def_id_from: DefId, def_id_to: DefId) -> Dependency {
+    let from_hash = tcx.def_path_hash(def_id_from);
+    let to_hash = tcx.def_path_hash(def_id_to);
+
+    Dependency { 
+        from_stable_crate_id: from_hash.stable_crate_id().as_u64(),
+        from_local_hash: from_hash.local_hash().as_u64(),
+        to_stable_crate_id: to_hash.stable_crate_id().as_u64(),
+        to_local_hash: to_hash.local_hash().as_u64(),
+    }
+}
+
+fn new_crate(tcx: &TyCtxt, crate_num: CrateNum, repo_id: u32, cargo_metadata_index: &CargoMetadataIndex) -> Crate {
+    let crate_name = tcx.crate_name(crate_num).to_string();
+    let rustc_path = get_path_from_crate_source(&tcx.used_crate_source(crate_num));
+
+    let Some(crate_metadata) = cargo_metadata_index.find_crate(crate_name.clone(), rustc_path)
+    else { panic!("could not find crate {:?} in `cargo_metadata_index`:\n\n{:#?}", crate_name, cargo_metadata_index); };
+
+    Crate {
+        stable_crate_id: tcx.stable_crate_id(crate_num).as_u64(),
+        src_repo: repo_id,
+        name: crate_name,
+        version: crate_metadata.version,
+        internal: crate_metadata.internal,
+        path_url: crate_metadata.path.into_string().unwrap(),
+        merged_crate_id: None,
+    }
+}
+
+fn get_path_from_crate_source(source: &CrateSource) -> PathBuf {
+    source.rmeta
+        .as_ref()
+        .or(source.rlib.as_ref())
+        .or(source.dylib.as_ref())
+        .unwrap()
+        .clone()
+}
+
+
+impl Callbacks for AnalysisCallback {
+    fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        let mut fn_def_id_graph: DirectedGraph<DefId> = DirectedGraph::default();
+        
+        for local_def_id in tcx.hir_body_owners() { // for all HIR bodies, get the def_id so we can access them
+
+            // scenarios:
+            // async function outside -> should be empty, can be ignored
+            // async function desugared body -> use parent def_id for graph
+            // async closure -> use own def_id for graph
+            // non-async funtion -> use own def_id for graph
+            let (def_id, local_def_id_is_async) = match if_is_coroutine_desugared_fn_get_parent_fn(&tcx, local_def_id) {
+                Some(parent_def_id) => (parent_def_id, true),
+                None => { match get_async_type_of_local_def_id(&tcx, local_def_id) {
+                    AsyncType::Const | AsyncType::Static => { continue; }, // skip since this cannot invoke async
+                    ty => (local_def_id, ty.is_async()),
+                }}, 
+            };
+
+            // create graph of function calls made by this
+            let fn_call_def_id_ls: Vec<DefId> = get_calls(tcx.optimized_mir(local_def_id)); // DefId of callee functions
+            let fn_call_def_id_ls_filtered: Vec<DefId> = fn_call_def_id_ls
+                .iter()
+                .filter(|d_id| callee_is_async(&tcx, **d_id))
+                .cloned()
+                .collect();
+
+            if !local_def_id_is_async && fn_call_def_id_ls_filtered.is_empty() {
+                // println!("non-async function did not call any async functions, not registering");
+            } else {
+                fn_def_id_graph.add_outgoing_from_iter(def_id.to_def_id(), fn_call_def_id_ls_filtered);
+            }
+        }
+
+        self.fill(fn_def_id_graph, &tcx);
+        Compilation::Continue
+    }
+}
+
+
+fn get_calls(mir_body: &rustc_middle::mir::Body) -> Vec<DefId> {
+    let mut fn_calls_def_id: Vec<DefId> = Vec::new();
+
+    for (_, bbd) in mir_body.basic_blocks.iter_enumerated() {
+        let fn_call_def_id_opt: Option<DefId> = match &bbd.terminator().kind {
+            rustc_middle::mir::TerminatorKind::Call { func, .. } | 
+            rustc_middle::mir::TerminatorKind::TailCall { func, .. }
+            => { 
+                match func {
+                    rustc_middle::mir::Operand::Constant(c) => {
+                        let ty = c.const_.ty();
+
+                        match ty.kind() {
+                            rustc_middle::ty::TyKind::FnDef(def_id, _) => Some(def_id.clone()),
+                            _ => None,
+                        }
+                    },
+                    _ => None,
+                }
+            },
+            _ => continue,
+        };
+
+        if let Some(fn_call_def_id) = fn_call_def_id_opt {
+            fn_calls_def_id.push(fn_call_def_id);
+        }
+    }
+
+    fn_calls_def_id
+}
+
+
+enum AsyncType {
+    AsyncFn,
+    AsyncClosure,
+    Const,
+    Static,
+    NotAsync,
+}
+
+impl AsyncType {
+    pub fn is_async(self) -> bool {
+        match self {
+            Self::AsyncFn | Self::AsyncClosure => true,
+            Self::Const | Self::Static | Self::NotAsync => false,
+        }
+    }
+}
+
+/// if it is not a function (=not owner), returns false
+/// if is a function but not defined with `async`, returns false
+/// if function and defined with `async`, returns true
+fn get_async_type_of_local_def_id(tcx: &TyCtxt, local_def_id: LocalDefId) -> AsyncType {
+    match tcx.hir_body_owner_kind(local_def_id) {
+        rustc_hir::BodyOwnerKind::Fn => {
+            let hir_id = tcx.local_def_id_to_hir_id(local_def_id);
+            if tcx.hir_node(hir_id).fn_sig().expect("function should have signature").header.is_async() {
+                return AsyncType::AsyncFn;
+            } else {
+                return AsyncType::NotAsync;
+            }
+        },
+        rustc_hir::BodyOwnerKind::Closure => {
+            match tcx.coroutine_kind(local_def_id) {
+                Some(rustc_hir::CoroutineKind::Desugared(rustc_hir::CoroutineDesugaring::Async, _)) => AsyncType::AsyncClosure,
+                _ => AsyncType::NotAsync
+            }
+        },
+        rustc_hir::BodyOwnerKind::Const {..} => AsyncType::Const,
+        rustc_hir::BodyOwnerKind::Static {..} => AsyncType::Static,
+        _ => AsyncType::NotAsync
+    }
+}
+
+/// this function fetches the HIR header for a function and checks if it is async
+/// if the `DefId` is not of a function, or not async, returns false 
+fn callee_is_async(tcx: &TyCtxt, def_id: DefId) -> bool {
+    // apparently, it is impossible to fully recover function headers from external crates
+    // thus we distinguish the following two cases:
+    // case1(internal crate): we check the function signature for `async`
+    // case2(external crate): we check if the return type is implements Future
+
+    match DefId::as_local(def_id) {
+        Some(local_def_id) => get_async_type_of_local_def_id(tcx, local_def_id).is_async(),
+        None => {
+            // println!("Parsing External Function: {:?}", def_id.clone());
+            
+            // NOTE: block below comes from chatGPT (has to be tweaked/fixed)
+            let fn_sig = tcx.fn_sig(def_id).instantiate_identity().skip_binder();
+            let output = fn_sig.output();
+
+            if let rustc_middle::ty::TyKind::Alias(alias) = output.kind() {
+                if let rustc_type_ir::AliasTy{kind: rustc_type_ir::AliasTyKind::Opaque{ def_id: alias_def_id }, ..} = alias {
+                    return matches!(tcx.opaque_ty_origin(*alias_def_id), rustc_hir::OpaqueTyOrigin::AsyncFn{..});
+                }
+            }
+
+            // println!("External Function was not async!");
+            false
+        }
+    }
+}
+
+
+/// given a coroutine (f1::closure#0), it checks if it is desugared from
+/// `async f1() {...}` and returns DefId of `f1`, else returns None
+/// 
+/// # Example
+/// async fn f0() {f1()} async fn f1() implies
+/// f0 -> {f1}, f1::closure#0 -> {...}
+/// since f1!=f1::closure#0 , this breaks the dependency chain
+/// we thus need to merge a desugared closure with it's original function
+fn if_is_coroutine_desugared_fn_get_parent_fn(tcx: &TyCtxt, local_def_id: LocalDefId) -> Option<LocalDefId> {
+    match tcx.coroutine_kind(local_def_id) {
+        Some(rustc_hir::CoroutineKind::Desugared(rustc_hir::CoroutineDesugaring::Async, rustc_hir::CoroutineSource::Fn)) => Some(tcx.local_parent(local_def_id)),
+        _ => None,
+    }
+}

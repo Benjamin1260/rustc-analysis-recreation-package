@@ -1,7 +1,9 @@
+#![feature(pathbuf_into_string)]
 
 use clap::Parser;
+use rustc_analysis::utils::{cargo_metadata::CargoMetadataIndex, db::{DB, Repo}, github::{clone_repo, fetch_repo_urls}};
 use shlex;
-use std::process::Command;
+use std::{fs::{OpenOptions, remove_file}, io::{ErrorKind::NotFound, Write}, path::{Path, PathBuf}, process::Command};
 
 use rustc_analysis::utils::cli::{Cli, Commands, CommonArgs};
 
@@ -9,42 +11,106 @@ use rustc_analysis::utils::cli::{Cli, Commands, CommonArgs};
 
 /// This function handles CLI user input and passes it onto cargo which then invokes the wrapper.
 /// Any preprocessing before Cargo is called is handled here
-fn main() {
-    let self_path = std::env::current_exe().expect("failed to get path of this executable");
-    let wrapper_path = self_path.with_file_name("rustc_analysis_wrapper");
+#[tokio::main]
+async fn main() {
+    // eprintln!("exe = {}", std::env::current_exe().unwrap().display());
+    // eprintln!("cwd = {}", std::env::current_dir().unwrap().display());
+
     let cli = Cli::parse();
+    let cmd_type = cli.command.as_env_str();
 
-    // TODO: COULD eliminate code re-use
-    match &cli.command {
+    match cli.command {
         Commands::FnDepTree { common: CommonArgs {target_dir, cargo_args} } => {
-            let mut cmd = Command::new("cargo");
-            cmd.arg("+nightly")
-                .arg("check");
-
-            if let Some(args) = cargo_args {
-                cmd.args(shlex::split(&args).expect("invalid cargo args"));
-            }
-
-            cmd.current_dir(target_dir)
-                .env("RUSTC_WORKSPACE_WRAPPER", wrapper_path) // TODO: MUST point this to wrapper
-                .env("RUSTC_ANALYSIS_KIND", Commands::FN_DEP_TREE)
-                .status()
+            let mut cmd = build_command(&cargo_args, &target_dir, cmd_type);
+            cmd.status()
                 .expect("cargo failed");
         },
-        Commands::Analyze { common: CommonArgs {target_dir, cargo_args} } => {
-            let mut cmd = Command::new("cargo");
-            cmd.arg("+nightly")
-                .arg("check");
+        Commands::InitRepoList { repo_count, duckdb_path } => {
+            // stage1: create and connect duckdb file (if file exists, remove it)
+            remove_file_if_present(&duckdb_path);
+            let db = DB::open(duckdb_path.into_string().unwrap());
+            db.insert_table_scheme();
 
-            if let Some(args) = cargo_args {
-                cmd.args(shlex::split(&args).expect("invalid cargo args"));
+            // stage2: fetch and insert list of repo urls
+            let urls = fetch_repo_urls(repo_count.try_into().expect("repo_count should be positive"))
+                .await
+                .unwrap();
+
+            db.insert_repo_urls(urls).unwrap();
+        },
+        Commands::Analyze { duckdb_path, repo_dir_path, enable_reuse } => {
+            // stage3: fetch data
+            let repos: Vec<Repo>;
+            {
+                let db = DB::open(duckdb_path.clone().into_string().unwrap());
+                repos = db.fetch_repos();
+                
+                for repo in &repos {
+                    let target_dir = repo_dir_path.join(Path::new(&repo.id.to_string()));
+
+                    clone_repo(repo.clone(), target_dir, &db, enable_reuse);
+                }
+
+                db.conn.close().unwrap();
             }
 
-            cmd.current_dir(target_dir)
-                .env("RUSTC_WORKSPACE_WRAPPER", wrapper_path) // TODO: MUST point this to wrapper
-                .env("RUSTC_ANALYSIS_KIND", Commands::ANALYZE)
-                .status()
-                .expect("cargo failed");
+            // stage4: run analysis
+            for repo in repos {
+                let target_dir = repo_dir_path.join(Path::new(&repo.id.to_string()));
+
+                // stage4_A: build cargo_metadata_index
+                let cargo_metadata_index: CargoMetadataIndex = target_dir.clone().into();
+                let cmi_serialized = serde_json::to_string(&cargo_metadata_index).unwrap();
+                std::fs::write(target_dir.with_file_name(".cargo_metadata_index"),cmi_serialized).unwrap();
+
+                // stage4_B: invoke wrapper/rustc backend
+                cargo_clean_workspace(&target_dir);
+                eprintln!("invoking cargo");
+                build_command(&repo.cargo_args, &target_dir, cmd_type)
+                    .env("REPOSITORY_ID", repo.id.to_string())
+                    .env("RUSTC_ANALYSIS_OUTPUT", std::fs::canonicalize(duckdb_path.clone()).unwrap().as_os_str())
+                    .status().unwrap();
+            }
         },
     }
+}
+
+
+fn remove_file_if_present(path: &PathBuf) {
+    match remove_file(&path) {
+        Ok(_) => {},
+        Err(err) => {
+            match err.kind() {
+                NotFound => {}, 
+                _ => {panic!("could not remove file")},
+            };          
+        },
+    }
+}
+
+fn build_command(cargo_args: &Option<String>, target_dir: &PathBuf, command: &str) -> Command {
+    let self_path = std::env::current_exe().expect("failed to get path of this executable");
+    let wrapper_path = self_path.with_file_name("rustc_analysis_wrapper");
+
+    let mut cmd = Command::new("cargo");
+    cmd.args(["+nightly", "check"]);
+
+    if let Some(args) = cargo_args {
+        cmd.args(shlex::split(&args).expect("invalid cargo args"));
+    }
+
+    cmd.current_dir(target_dir)
+        .env("RUSTC_WORKSPACE_WRAPPER", wrapper_path)
+        .env("RUSTC_ANALYSIS_KIND", command);
+
+    return cmd;
+}
+
+fn cargo_clean_workspace(target_dir: &PathBuf) {
+    println!("Cleaning {}", target_dir.to_str().unwrap());
+
+    Command::new("cargo")
+        .current_dir(target_dir)
+        .arg("clean")
+        .status().unwrap();
 }
