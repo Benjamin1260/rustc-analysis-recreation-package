@@ -1,3 +1,5 @@
+use std::{thread, time::{Duration, Instant}};
+
 use duckdb::{Connection, params};
 
 use crate::utils::analysis_results::AnalysisResults;
@@ -53,11 +55,8 @@ pub struct DB {
 
 impl DB {
     // DB creation/initiation
-    pub fn open(path: String) -> Self {
-        let connection = Connection::open(path)
-            .expect("failed to establish duckdb connection");
-
-        DB{conn: connection}   
+    pub fn open(path: &String) -> duckdb::Result<Self> {
+        Ok(DB{conn: Connection::open(&path)?})
     }
 
     pub fn insert_table_scheme(&self) {
@@ -70,6 +69,29 @@ impl DB {
         "#).unwrap();
         
         stmt.execute(params![0, "placeholder"]).unwrap();
+    }
+
+    // try open db, if already opened, wait and retry
+    pub fn open_with_retry(path: &String, timeout: Duration) -> Self {
+        let start = Instant::now();
+
+        loop {
+            let res = Self::open(&path);
+            
+            match res {
+                Ok(db) => { return db; },
+                Err(_) => {
+                    // eprintln!("failed to open db for {}ms: {}", start.elapsed().as_millis(), err);
+
+                    if start.elapsed() > timeout {
+                        panic!("failed to open db, timeout surpassed");
+                    } else {
+                        thread::sleep(Duration::from_millis(250));
+                    }
+                },
+            }
+
+        }
     }
 
 
@@ -158,10 +180,19 @@ impl DB {
             // TODO: SHOULD check if this should remain skipped
 
             // persist DefIds
-            tx.appender("DefIds")
-                .unwrap()
-                .append_rows(results.def_ids.into_iter().map(DefIdRow::params))
-                .unwrap();
+            let mut stmt = tx.prepare(r#"
+                INSERT OR IGNORE INTO DefIds
+                VALUES (?, ?, ?, ?, ?, ?) 
+                "#).unwrap();
+            
+            for def_id in results.def_ids {
+                stmt.execute(def_id.params()).unwrap();
+            }
+
+            // tx.appender("DefIds")
+            //     .unwrap()
+            //     .append_rows(results.def_ids.into_iter().map(DefIdRow::params))
+            //     .unwrap();
 
             // persist Dependencies
             tx.appender("Dependencies")

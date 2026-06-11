@@ -22,9 +22,9 @@ pub struct CrateMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrateMetadataIndex {
-    alias_to_idx: HashMap<String, Vec<usize>>,
+    alias_to_idx: HashMap<String, HashSet<usize>>,
     crate_metadata_ls: Vec<CrateMetadata>,
-    pub local_crate: CrateMetadata,
+    pub local_crate: Option<CrateMetadata>,
 }
 
 impl CrateOrigin {
@@ -36,7 +36,6 @@ impl CrateOrigin {
     }
 
     // TODO: SHOULD remove this and in-lieu update the database scheme
-    #[deprecated]
     pub fn is_internal(&self) -> bool {
         match self {
             Self::Workspace(_) => true,
@@ -69,6 +68,8 @@ impl Display for CrateMetadata {
 }
 
 impl CrateMetadataIndex {
+    pub const FILE_NAME: &'static str = ".crate_metadata_index";
+
     pub fn from_path(cwd: PathBuf, repo: &Repo) -> Self {
         let mut cmd = MetadataCommand::new();
         cmd.current_dir(cwd);
@@ -83,47 +84,51 @@ impl CrateMetadataIndex {
 
     pub fn new(metadata: Metadata) -> Self {
         let workspace_members: HashSet<PackageId> = metadata.workspace_members.iter().cloned().collect();
-        let local_package = metadata.root_package().unwrap().clone();
-        let mut alias_to_idx: HashMap<String, Vec<usize>> = HashMap::with_capacity(metadata.packages.len());
+        let local_package: Option<Package> = metadata.root_package().cloned();
+        let mut alias_to_idx: HashMap<String, HashSet<usize>> = HashMap::with_capacity(metadata.packages.len());
         let mut crate_metadata_ls: Vec<CrateMetadata> = Vec::with_capacity(metadata.packages.len());
 
         for package in metadata.packages {
-            let crate_metadata = CrateMetadata::from_package(&package, &workspace_members, package.eq(&local_package));
+            let crate_metadata = CrateMetadata::from_package(&package, &workspace_members, local_package.as_ref().is_some_and(|l_pkg| package.eq(l_pkg)));
             let idx = crate_metadata_ls.len();
             crate_metadata_ls.push(crate_metadata);
 
-            let package_alias_ls: Vec<String> = package.targets.iter()
-                //.map(|target| target.name.replace("-", "_")) // might be different in rustc and cargo, we default to _
-                .map(|target| target.name.clone()) // changing name should not be required since using target name
-                .collect();
+            for target in package.targets {
+                let alias = target.name.replace("-", "_");
 
-            for alias in package_alias_ls {
+                // if alias.contains('-') {
+                //     panic!("alias still contains -");
+                // }
+
                 alias_to_idx.entry(alias)
                     .or_default()
-                    .push(idx);
+                    .insert(idx);
             }
         }
 
         Self{
             alias_to_idx: alias_to_idx,
             crate_metadata_ls: crate_metadata_ls,
-            local_crate: CrateMetadata::from_package(&local_package, &workspace_members, true),
+            local_crate: local_package.map(|l_pkg| CrateMetadata::from_package(&l_pkg, &workspace_members, true)),
         }
     }
 
     fn get_crate_metadata_ls_from_alias(&self, alias: &String) -> Vec<&CrateMetadata> {
         // replace from - -> _ should not be needed since using target name verbatim
-        let idx_ls = self.alias_to_idx.get(alias).expect("alias unknown").clone(); // TODO: return closest matches here // should not be necessary anymore since using targets
-        self.crate_ls_from_idx_ls(idx_ls)
+        let Some(idx_ls) = self.alias_to_idx.get(alias) else {
+            // should return closest matches here // should not be necessary anymore since using targets
+            panic!("ERROR: requested crate_metadata_ls from CMI for unknown alias!\nAlias: {}\nCMI: {:#?}", alias, self);
+        };
+        self.crate_ls_from_idx_ls(idx_ls.iter().copied())
     }
 
     pub fn find_crates_with_alias(&mut self, crate_name: String, rustc_path: PathBuf) -> Vec<&CrateMetadata> {
-        // let crate_name = crate_name.replace("-", "_"); // might be different in rustc and cargo, we default to _
+        let crate_name = crate_name.replace("-", "_"); // might be different in rustc and cargo, we default to _
 
         // special case: std crates are not in added by cargo_metadata
         // we check if they are present and if they are not, we add them
         if Self::is_sysroot(&rustc_path) {
-            println!("Attention! Sysroot detected: {:?}", crate_name.clone());
+            // println!("Attention! Sysroot detected: {:?}", crate_name.clone());
             let idx_ls = self.alias_to_idx.get(&crate_name);
 
 
@@ -154,6 +159,7 @@ impl CrateMetadataIndex {
     }
 
     fn add_sysroot_crate(&mut self, crate_name: String, rustc_path: PathBuf) -> &CrateMetadata {
+        let crate_name = crate_name.replace("-", "_"); // rustc and cargo use different representations, we default to _
         let idx = self.crate_metadata_ls.len();
 
         self.crate_metadata_ls.push(CrateMetadata { 
@@ -166,12 +172,15 @@ impl CrateMetadataIndex {
         self.alias_to_idx
             .entry(crate_name.clone())
             .or_default()
-            .push(idx);
+            .insert(idx);
 
         &self.crate_metadata_ls[idx]
     }
 
-    fn crate_ls_from_idx_ls(&self, idx_ls: Vec<usize>) -> Vec<&CrateMetadata> {
+    fn crate_ls_from_idx_ls<T>(&self, idx_ls: T) -> Vec<&CrateMetadata> 
+    where 
+        T: IntoIterator<Item = usize>,
+    {
         idx_ls.into_iter().map(|idx| &self.crate_metadata_ls[idx]).collect()
     }
 

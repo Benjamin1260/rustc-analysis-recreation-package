@@ -8,10 +8,15 @@
 
 ## 1. Running The Analyzer
 
-### 1.1. Fetching New Repositories
+### 1.1 Dependencies And Requirements
 
-More sections will be added
+### 1.2 Obtaining A List of Repositories
+
+### 1.3 Getting DuckDB MIR Static Analysis Results
+
+### 1.4 Interpreting The Tool Output
 
 ## 2. Analyzer Architecture
 
 TODO: add git being a required CLI tool
+TODO: add rust toolchain version

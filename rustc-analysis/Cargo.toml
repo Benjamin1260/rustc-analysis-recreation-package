@@ -14,9 +14,6 @@ path = "src/bin/rustc_analysis.rs"
 name = "rustc_analysis_wrapper"
 path = "src/bin/rustc_analysis_wrapper.rs"
 
-[toolchain]
-channel = "nightly"
-
 [package.metadata.rust-analyzer]
 rustc_private = true
 

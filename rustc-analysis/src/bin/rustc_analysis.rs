@@ -28,7 +28,7 @@ async fn main() {
         Commands::InitRepoList { repo_count, duckdb_path } => {
             // stage1: create and connect duckdb file (if file exists, remove it)
             remove_file_if_present(&duckdb_path);
-            let db = DB::open(duckdb_path.into_string().unwrap());
+            let db = DB::open(&duckdb_path.into_string().unwrap()).unwrap();
             db.insert_table_scheme();
 
             // stage2: fetch and insert list of repo urls
@@ -39,10 +39,12 @@ async fn main() {
             db.insert_repo_urls(urls).unwrap();
         },
         Commands::Analyze { duckdb_path, repo_dir_path, enable_reuse } => {
+            let repo_dir_path = repo_dir_path.canonicalize().unwrap(); // for debugging purposes, path from root removes unclarity
+
             // stage3: fetch data
             let repos: Vec<Repo>;
             {
-                let db = DB::open(duckdb_path.clone().into_string().unwrap());
+                let db = DB::open(&duckdb_path.clone().into_string().unwrap()).unwrap();
                 repos = db.fetch_repos();
                 
                 for repo in &repos {
@@ -61,24 +63,27 @@ async fn main() {
                     continue;
                 } 
 
-                let target_dir = repo_dir_path.join(Path::new(&repo.id.to_string()));
+                let target_dir = repo_dir_path.join(&repo.id.to_string());
+                let cmi_path = target_dir.join(CrateMetadataIndex::FILE_NAME);
+                println!("DEBUG: writing CMI to: {}", cmi_path.display());
 
                 // stage4_A: build cargo_metadata_index
                 let cargo_metadata_index: CrateMetadataIndex = CrateMetadataIndex::from_path(target_dir.clone(), &repo);
                 let cmi_serialized = serde_json::to_string(&cargo_metadata_index).unwrap();
-                std::fs::write(target_dir.with_file_name(".cargo_metadata_index"),cmi_serialized).unwrap();
+                std::fs::write(cmi_path,cmi_serialized).unwrap();
 
                 // stage4_B: invoke wrapper/rustc backend
-                cargo_clean_workspace(&target_dir);
+                cargo_clean_workspace(&target_dir, &repo.cargo_args); // FIXME: SHOULD, errors on any other arg than --manifest-path, should add col to duckdb with manifest path separate from cargo args
                 eprintln!("invoking cargo");
                 let result = build_command(&repo.cargo_args, &target_dir, cmd_type)
+                    // .arg("--jobs=1") TODO: SHOULD fix using multiple threads
                     .env("REPOSITORY_ID", repo.id.to_string())
                     .env("RUSTC_ANALYSIS_OUTPUT", std::fs::canonicalize(duckdb_path.clone()).unwrap().as_os_str())
                     .status().unwrap();
 
                 if result.success() {
                     println!("Analysis successful, writing to db!");
-                    let db = DB::open(duckdb_path.clone().into_string().unwrap());
+                    let db = DB::open(&duckdb_path.clone().into_string().unwrap()).unwrap();
                     db.set_analyzed_true(repo.id);
                     db.conn.close().unwrap();
                 }
@@ -121,11 +126,17 @@ fn build_command(cargo_args: &Option<String>, target_dir: &PathBuf, command: &st
     return cmd;
 }
 
-fn cargo_clean_workspace(target_dir: &PathBuf) {
-    println!("Cleaning {}", target_dir.to_str().unwrap());
+fn cargo_clean_workspace(target_dir: &PathBuf, cargo_args: &Option<String>) {
+    println!("Cleaning {}", target_dir.canonicalize().unwrap().display());
 
-    Command::new("cargo")
-        .current_dir(target_dir)
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(target_dir)
         .arg("clean")
-        .status().unwrap();
+        .arg("--workspace");
+
+    if let Some(args) = cargo_args {
+        cmd.args(shlex::split(&args).expect("invalid cargo args"));
+    }
+
+    cmd.status().unwrap();
 }

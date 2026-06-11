@@ -6,7 +6,7 @@ mod rustc_private_utils;
 
 extern crate rustc_driver;
 
-use std::{fs::OpenOptions, io::Write};
+use std::{fs::OpenOptions, io::Write, time::Duration};
 
 use rustc_private_utils::{analysis_callback::AnalysisCallback, fn_dep_analysis};
 use rustc_analysis::utils::{analysis_results::AnalysisResults, crate_metadata_index::CrateMetadataIndex, cli::Commands, db::DB};
@@ -49,13 +49,18 @@ fn run_analyze(args: Vec<String>) {
     
     let repo_id = u32::from_str_radix(std::env::var("REPOSITORY_ID").unwrap().as_str(), 10).unwrap();
 
-    let cwd = std::env::current_dir().unwrap();
-    let cmi_serialized = std::fs::read_to_string(cwd.with_file_name(".cargo_metadata_index")).unwrap();
-    let cargo_metadata_index: CrateMetadataIndex = serde_json::from_str(&cmi_serialized).unwrap();
+    let mut cmi_path = std::env::current_dir().unwrap().join(CrateMetadataIndex::FILE_NAME);
+    while !cmi_path.exists() {
+        // eprintln!("crate_metadata_index could not be found here: {}\nlooking at parent dir", cmi_path.display());
+        cmi_path = cmi_path.parent().expect("parent did not exist!").with_file_name(CrateMetadataIndex::FILE_NAME); // TODO: COULD write better error
+    }
+
+    let Ok(cmi_serialized) = std::fs::read_to_string(&cmi_path) else {panic!("could not read from serialized crate_metadata_index: {}", cmi_path.display());};
+    let crate_metadata_index: CrateMetadataIndex = serde_json::from_str(&cmi_serialized).unwrap();
 
     let mut analysis_callback = AnalysisCallback {
         repo_id: repo_id,
-        crate_metadata_index: cargo_metadata_index,
+        crate_metadata_index: crate_metadata_index,
         data: AnalysisResults::default(),
     };
 
@@ -66,7 +71,8 @@ fn run_analyze(args: Vec<String>) {
 
     let db_path = std::env::var("RUSTC_ANALYSIS_OUTPUT").unwrap();
     {
-        let mut db = DB::open(db_path);
+        // TODO: COULD make this async?
+        let mut db = DB::open_with_retry(&db_path, Duration::from_secs(600)); // honestly, just waiting usually resolves itself
         db.save_results(analysis_callback.repo_id, analysis_callback.data);
         db.conn.close().unwrap();
     }

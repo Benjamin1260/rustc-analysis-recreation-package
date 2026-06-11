@@ -113,8 +113,11 @@ implement [L0-pipeline architecture](#l0-pipeline-arch)
 - [x] create `AnalysisCallback` struct with tables using these row types (KEEP IN MIND: CALLBACK MIGHT BE INVOKED MULTIPLE TIMES, WHICH/WHEN DO WE WRITE BACK?) (maybe not since only callback for workspace crate?)
 - [x] make callback write to these tables
 - [x] after rustc invocation, write these results to `.duckdb` file
-- [ ] fix `CrateMetadataIndex` to properly resolve/handle `self` and `rust-lib` crates &larr;
-- [ ] fix TODOs in sourcecode
+- [x] fix `CrateMetadataIndex` to properly resolve/handle `self` and `rust-lib` crates
+- [ ] fix TODOs in sourcecode &larr;
+
+STOP HERE, GET SOME RESULTS FIRST (e.g. on 3 small crates manually)
+
 - [ ] implement write to `cargo_invocation.csv` on analysis invocation
 - [ ] create API/command to simply write `cargo_invocation.csv` (without err msg)
 - [ ] create API/command to simply read `cargo_invocation.csv`
