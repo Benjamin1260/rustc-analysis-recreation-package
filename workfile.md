@@ -118,11 +118,15 @@ implement [L0-pipeline architecture](#l0-pipeline-arch)
 
 STOP HERE, GET SOME RESULTS FIRST (e.g. on 3 small crates manually)
 
+- [ ] repository url, check if this points to github, if so can be used to resolve `tokio-rs`/`smol-rs`/`async-rs`
+- [ ] include non-async calls (?) -> such that we can answer significance and runtime usage
+- [ ] run analysis on more repositories
+
+Low-Prio
 - [ ] implement write to `cargo_invocation.csv` on analysis invocation
 - [ ] create API/command to simply write `cargo_invocation.csv` (without err msg)
 - [ ] create API/command to simply read `cargo_invocation.csv`
 - [ ] create arg on `analysis`-command that takes `cargo_invocation.csv`
-- [ ] implement pipeline `stage5`
 
 
 #### Questions:

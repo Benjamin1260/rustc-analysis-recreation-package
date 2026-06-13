@@ -2,4 +2,5 @@ repositories/
 target/
 
 *.duckdb
+*.duckdb.*
 .vscode
