@@ -130,6 +130,7 @@ fn new_crate(tcx: &TyCtxt, cargo_metadata_index: &mut CrateMetadataIndex, _repo_
         internal: crate_metadata.origin.is_internal(), // TODO: SHOULD remove internal
         path_url: crate_metadata.path.into_string().unwrap(),
         merged_crate_id: None,
+        repo_url: crate_metadata.repo_url,
     }
 }
 

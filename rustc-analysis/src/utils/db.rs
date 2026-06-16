@@ -22,6 +22,7 @@ pub struct Crate {
     pub internal: bool,
     pub path_url: String,
     pub merged_crate_id: Option<u32>,
+    pub repo_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -167,7 +168,7 @@ impl DB {
             // persist Crates
             let mut stmt = tx.prepare(r#"
                 INSERT INTO Crates
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(stable_crate_id) DO NOTHING
             "#).unwrap();
 
@@ -182,7 +183,7 @@ impl DB {
             // persist DefIds
             let mut stmt = tx.prepare(r#"
                 INSERT OR IGNORE INTO DefIds
-                VALUES (?, ?, ?, ?, ?, ?) 
+                VALUES (?, ?, ?, ?, ?, ?, NULL) 
                 "#).unwrap();
             
             for def_id in results.def_ids {
@@ -210,11 +211,9 @@ impl DB {
             field VARCHAR PRIMARY KEY
         );
 
-        CREATE TABLE ProblemTree (
+        CREATE OR REPLACE TABLE ProblemTree (
             problem VARCHAR PRIMARY KEY,
-            parent VARCHAR,
-
-            FOREIGN KEY (parent) REFERENCES ProblemTree(problem)
+            parent VARCHAR, -- references ProblemTree.problem (soft constraint)
         );
 
         CREATE TABLE DefIdKinds (
@@ -248,6 +247,7 @@ impl DB {
             internal BOOLEAN NOT NULL,
             path_url VARCHAR NOT NULL,
             merged_crate_id UINT32,
+            repo_url, -- points to crate source code repo, not the analyzed repo
 
             FOREIGN KEY (merged_crate_id) REFERENCES MergedCrates(id)
         );
@@ -259,6 +259,7 @@ impl DB {
             def_path_str VARCHAR NOT NULL,
             kind UINT32 NOT NULL,
             unsafe BOOLEAN NOT NULL,
+            problem VARCHAR,
             
             PRIMARY KEY (stable_crate_id, local_hash),
             FOREIGN KEY (stable_crate_id) REFERENCES Crates(stable_crate_id),
@@ -276,25 +277,11 @@ impl DB {
             FOREIGN KEY (from_stable_crate_id, from_local_hash) REFERENCES DefIds(stable_crate_id, local_hash),
             FOREIGN KEY (to_stable_crate_id, to_local_hash) REFERENCES DefIds(stable_crate_id, local_hash)
         );
-
-        CREATE TABLE ManAnalysisResults (
-            stable_crate_id UINT64 NOT NULL,
-            local_hash UINT64 NOT NULL,
-            problem VARCHAR NOT NULL,
-            file_path VARCHAR NOT NULL,
-            line_nr_start UINT32 NOT NULL,
-            line_nr_end UINT32 NOT NULL,
-
-            PRIMARY KEY (stable_crate_id, local_hash, problem),
-            FOREIGN KEY (stable_crate_id, local_hash) REFERENCES DefIds(stable_crate_id, local_hash),
-            FOREIGN KEY (problem) REFERENCES ProblemTree(problem),
-            CHECK (line_nr_end >= line_nr_start)
-        );
     "; 
 }
 
 impl Crate {
-    fn params(self) -> (u64, String, String, bool, String, Option<u32>) {
+    fn params(self) -> (u64, String, String, bool, String, Option<u32>, Option<String>) {
         (
             self.stable_crate_id,
             self.name,
@@ -302,6 +289,7 @@ impl Crate {
             self.internal,
             self.path_url,
             self.merged_crate_id,
+            self.repo_url,
         )
     }
 }

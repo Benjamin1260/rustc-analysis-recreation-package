@@ -18,6 +18,7 @@ pub struct CrateMetadata {
     pub version: String,
     pub origin: CrateOrigin,
     pub path: PathBuf,
+    pub repo_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +58,7 @@ impl CrateMetadata {
             version: package.version.to_string(),
             origin: origin,
             path: package.manifest_path.parent().unwrap().into(),
+            repo_url: package.repository.clone(),
         }
     }
 }
@@ -167,6 +169,7 @@ impl CrateMetadataIndex {
             version: "?".to_owned(), 
             origin: CrateOrigin::Sysroot, 
             path: rustc_path,
+            repo_url: Some("https://github.com/rust-lang/rust".to_owned()),
         });
 
         self.alias_to_idx
