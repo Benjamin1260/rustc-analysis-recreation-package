@@ -38,7 +38,7 @@ This can be done by using the `init-repo-list` command on the compiled binary. A
 
 #### 1.3.2 Reusing An Existing `.duckdb` File
 
-Alternatively, you may also reuse an existing `.duckdb` file that already has these repositories and commit hashes defined. This way, you can reproduce someone else's findings. A copy of the `.duckdb` used in [our study](https://repository.tudelft.nl/record/uuid:1ae0a0bc-9c1b-4cae-a7a3-f7e734ec1531) can be found in our Github repository under `data/`.
+Alternatively, you may also reuse an existing `.duckdb` file that already has these repositories and commit hashes defined. This way, you can reproduce someone else's findings. A copy of the `.duckdb` used in [our study](https://repository.tudelft.nl/record/uuid:1ae0a0bc-9c1b-4cae-a7a3-f7e734ec1531) can be found [under the duckdb dir](duckdb/analysis.duckdb).
 
 ### 1.4 Fetching The Repositories
 
@@ -62,4 +62,6 @@ At the end of this analysis, all extracted data will be added to the `.duckdb` f
 
 ### 1.7 Interpreting The DuckDB Output
 
-To analyze the output of our tool, use the DuckDB CLI or notebook functionality. Within this repository, we include the notebook used to find the answers to our research questions. For an entity-relationship diagram of the output file, please check our [research paper](https://repository.tudelft.nl/record/uuid:1ae0a0bc-9c1b-4cae-a7a3-f7e734ec1531).
+To analyze the output of our tool, use the DuckDB CLI or notebook functionality. Within this repository, we include the notebook used to find the answers to our research questions [in the duckdb directory](duckdb/notebook.db). For an entity-relationship diagram of the output file, please check our [research paper](https://repository.tudelft.nl/record/uuid:1ae0a0bc-9c1b-4cae-a7a3-f7e734ec1531).
+
+Furthermore, a description of the categorization we did can be found [in the documents directory](documents/categorization.md).
