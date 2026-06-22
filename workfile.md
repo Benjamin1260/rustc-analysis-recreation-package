@@ -9,11 +9,11 @@
 
 ### L0-Pipeline Architecture:
 
-1. (optional) creating .duckdb file
-2. (optional) generating repository list
-3. fetch data
-4. run analysis
-5. duckdb postprocessing
+- 0. (optional) creating .duckdb file + generating repository list
+- 1. fetch data
+- 2. gathering metadata
+- 3. analysis using compiler
+- 4. writeback to DuckDB file
 
 #### 1. creating .duckdb file
 

@@ -3,7 +3,7 @@ set -euo pipefail
 trap 'echo "Error on line $LINENO" >&2' ERR
 
 OUT="dep_analysis_results.csv"
-KEYWORDS=("tokio" "smol" "async_std" "fuchsia_async")
+KEYWORDS=("tokio" "smol" "async_std" "futures")
 
 printf 'project,%s\n' "$(IFS=,; echo "${KEYWORDS[*]}")" > "$OUT"
 
